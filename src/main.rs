@@ -3,6 +3,8 @@ use std::pin::Pin;
 use std::process::exit;
 use std::sync::{Arc, Mutex};
 
+// Something with this? https://github.com/iced-rs/iced/blob/master/examples/events/src/main.rs
+
 mod keyboard;
 
 use winapi::um::winuser::{WH_KEYBOARD_LL, SetWindowsHookExA, UnhookWindowsHookEx, CallNextHookEx, WM_KEYDOWN, LPKBDLLHOOKSTRUCT};
