@@ -4,6 +4,8 @@ use winapi::um::winuser::{
 };
 use rust_win32error::*;
 
+// TODO https://www.hackster.io/HiAmadeus/analog-inputs-on-windows-10-raspberry-pi-using-adc-493ab9
+
 use iced::{executor, Application, Clipboard, Command, Container, Element, HorizontalAlignment, Length, Settings, Text, VerticalAlignment, Row, Scrollable, TextInput, Button};
 use iced_futures::{futures, BoxStream};
 use iced_native::subscription::Subscription;
@@ -141,10 +143,12 @@ impl Application for Example {
                 .push(Text::new("AAA")
                     .height(Length::FillPortion(70))
                     .size(100)
+                    .vertical_alignment(VerticalAlignment::Center)
                 )
                 .push(Text::new("AAA")
                     .height(Length::FillPortion(30))
                     .size(30)
+                    .vertical_alignment(VerticalAlignment::Center)
                 )
             )
             .push(Column::new()
@@ -154,6 +158,7 @@ impl Application for Example {
                     .height(Length::FillPortion(30))
                     .size(30)
                     .horizontal_alignment(HorizontalAlignment::Right)
+                    .vertical_alignment(VerticalAlignment::Center)
                 )
             )
             .height(Length::FillPortion(30))
@@ -174,8 +179,8 @@ impl Application for Example {
                     .width(Length::FillPortion(10))
                     .on_press(Message::DeletePressed)
                 )
-                .spacing(10)
-        );
+                .spacing(10))
+            .spacing(10);
 
         for i in 0..100 {
             scrollable = scrollable.push(Row::new().push(
@@ -231,7 +236,11 @@ fn main() {
         exit(2);
     }
 
-    if let Err(e) = Example::run(Settings::default()) {
+    let mut settings = Settings::default();
+    settings.window = Default::default();
+    settings.window.min_size = Some((600, 400));
+
+    if let Err(e) = Example::run(settings) {
         eprintln!("Application failed! ({:?})", e);
     }
 
