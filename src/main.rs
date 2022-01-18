@@ -1,34 +1,29 @@
-use std::ops::{Deref, DerefMut};
-use std::pin::Pin;
-use std::process::exit;
-use std::sync::{Arc, Mutex};
-
-// Something with this? https://github.com/iced-rs/iced/blob/master/examples/events/src/main.rs
-
-mod keyboard;
-
-use winapi::um::winuser::{WH_KEYBOARD_LL, SetWindowsHookExA, UnhookWindowsHookEx, CallNextHookEx, WM_KEYDOWN, LPKBDLLHOOKSTRUCT};
-
+use winapi::um::winuser::{
+    CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, LPKBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
+    WM_KEYDOWN,
+};
 use rust_win32error::*;
 
-use iced::{button, executor, Align, Application, Button, Column, Command, Container, Element, Length, ProgressBar, Settings, Subscription, Text, Clipboard, Color, HorizontalAlignment, VerticalAlignment};
-use iced::window::Mode;
-use crate::keyboard::KeyCode;
+use iced::{executor, Application, Clipboard, Command, Container, Element, HorizontalAlignment, Length, Settings, Text, VerticalAlignment, Row, Scrollable, TextInput, Button};
+use iced_futures::{futures, BoxStream};
+use iced_native::subscription::Subscription;
+use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::task::{Context, Poll};
-use futures_channel::mpsc::{unbounded, UnboundedSender, UnboundedReceiver, TryRecvError};
-use iced_futures::{BoxStream, futures};
-use rand::{Rng, RngCore};
+use std::process::exit;
+use iced_native::{Column, Slider};
+use iced_native::event::Status;
 
 use once_cell::sync::OnceCell;
-use crate::futures::StreamExt;
+use rand::RngCore;
+
+mod keyboard;
+use keyboard::KeyCode;
 
 static SENDER: OnceCell<SyncWrapper> = OnceCell::new();
 
 #[derive(Debug)]
 struct SyncWrapper {
-    sender: UnboundedSender<Message>
+    sender: UnboundedSender<Message>,
 }
 
 unsafe impl Sync for SyncWrapper {}
@@ -39,20 +34,32 @@ impl SyncWrapper {
     }
 
     fn new(sender: UnboundedSender<Message>) -> SyncWrapper {
-        SyncWrapper {
-            sender
-        }
+        SyncWrapper { sender }
     }
 }
 
 #[derive(Debug)]
-enum Example {
-    Counter(isize)
+struct Example {
+    counter: isize,
+    kb_worker: KbWorker,
+    slider: iced::slider::State,
+    scrollable_state: iced::scrollable::State,
+    input_state1: iced::text_input::State,
+    text1: String,
+    input_state2: iced::text_input::State,
+    text2: String,
+    slider_value: f32,
+    button: iced::button::State
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    IncreaseCounter
+    Ready(UnboundedSender<Message>),
+    KeyEvent(keyboard::KeyCode),
+    VolumeChanged(f32),
+    Text1Changed(String),
+    Text2Changed(String),
+    DeletePressed
 }
 
 impl Application for Example {
@@ -62,45 +69,141 @@ impl Application for Example {
 
     fn new(_: Self::Flags) -> (Self, Command<Self::Message>) {
         (
-            Example::Counter(0),
-            Command::none()
+            Example {
+                counter: 0,
+                kb_worker: KbWorker::new(),
+                slider: iced::slider::State::new(),
+                scrollable_state: iced::scrollable::State::new(),
+                input_state1: iced::text_input::State::new(),
+                text1: String::new(),
+                input_state2: iced::text_input::State::new(),
+                text2: String::new(),
+                slider_value: 0.0,
+                button: iced::button::State::new()
+            },
+            Command::none(),
         )
     }
 
     fn title(&self) -> String {
-        if let Self::Counter(num) = self {
-            format!("Counter - {}", num)
-        } else {
-            String::from("ERROR")
-        }
+        format!("Counter - {}", self.counter)
     }
 
     fn update(&mut self, message: Self::Message, _: &mut Clipboard) -> Command<Self::Message> {
-        let val = if let Self::Counter(num) = self {
-            *num
-        } else {
-            0
-        };
         match message {
-            Message::IncreaseCounter => {
-                *self = Self::Counter(val + 1);
+            Message::Ready(sender) => {
+                if let Err(_) = SENDER.set(SyncWrapper::new(sender)) {
+                    eprintln!("Could not set sender!");
+                    exit(4)
+                }
+            }
+            Message::KeyEvent(code) => {
+                self.handle_keystroke(code);
+            }
+            Message::VolumeChanged(vol) => {
+                self.slider_value = vol;
+            }
+            Message::Text1Changed(s) => {
+                self.text1 = s;
+            }
+            Message::Text2Changed(s) => {
+                self.text2 = s;
+            }
+            Message::DeletePressed => {
+                println!("Hello World!");
             }
         }
         Command::none()
     }
 
-    fn view(&mut self) -> Element<'_, Self::Message> {
-        let number: Element<_> = match self {
-            Example::Counter(num) => {
-                Text::new(num.to_string())
-                    .horizontal_alignment(HorizontalAlignment::Center)
-                    .vertical_alignment(VerticalAlignment::Center)
-                    .size(100)
-                    .into()
-            }
-        };
+    fn subscription(&self) -> Subscription<Self::Message> {
+        Subscription::batch([
+            self.kb_worker.subscription(),
+            iced_native::subscription::events_with(|event, status| {
+                match status {
+                    Status::Ignored => {
+                        if let iced_native::Event::Keyboard(iced_native::keyboard::Event::KeyPressed { key_code, modifiers }) = event {
+                            Some(key_code)
+                        } else {
+                            None
+                        }
+                    }
+                    Status::Captured => None
+                }
+            }).map(|e| Message::KeyEvent(keyboard::KeyCode::from(e)))
+        ])
+    }
 
-        Container::new(number)
+    fn view(&mut self) -> Element<'_, Self::Message> {
+        let tempo: Element<_> = Row::new()
+            .push(Column::new()
+                .width(Length::FillPortion(70))
+                .push(Text::new("AAA")
+                    .height(Length::FillPortion(70))
+                    .size(100)
+                )
+                .push(Text::new("AAA")
+                    .height(Length::FillPortion(30))
+                    .size(30)
+                )
+            )
+            .push(Column::new()
+                .width(Length::FillPortion(30))
+                .push(Text::new("").height(Length::FillPortion(70)))
+                .push(Text::new("AAA")
+                    .height(Length::FillPortion(30))
+                    .size(30)
+                    .horizontal_alignment(HorizontalAlignment::Right)
+                )
+            )
+            .height(Length::FillPortion(30))
+            .padding(10)
+            .into();
+
+        let mut scrollable = Scrollable::new(&mut self.scrollable_state)
+            .width(Length::Fill)
+            .push(Row::new()
+                .height(Length::Units(30))
+                .push(TextInput::new(&mut self.input_state1, "1", &self.text1, Message::Text1Changed)
+                    .width(Length::FillPortion(45))
+                )
+                .push(TextInput::new(&mut self.input_state2, "2", &self.text2, Message::Text2Changed)
+                    .width(Length::FillPortion(45))
+                )
+                .push(Button::new(&mut self.button, Text::new("Del"))
+                    .width(Length::FillPortion(10))
+                    .on_press(Message::DeletePressed)
+                )
+                .spacing(10)
+        );
+
+        for i in 0..100 {
+            scrollable = scrollable.push(Row::new().push(
+                Text::new(format!("Text {}", i)))
+            )
+            .height(Length::Units(30));
+        }
+
+        let grid: Element<_>  = Row::new()
+            .height(Length::FillPortion(60))
+            .push(
+                scrollable
+            )
+            .padding(10).into();
+
+        let volume: Element<_> = Row::new()
+            .padding(10)
+            .push(Slider::new(&mut self.slider, 0.0..=100.0, self.slider_value, Message::VolumeChanged))
+            .height(Length::FillPortion(10))
+            .into();
+
+        let combined: Element<_> = Column::new()
+            .push(tempo)
+            .push(grid)
+            .push(volume)
+            .into();
+
+        Container::new(combined)
             .width(Length::Fill)
             .height(Length::Fill)
             .center_x()
@@ -109,81 +212,102 @@ impl Application for Example {
     }
 }
 
+impl Example {
+    fn handle_keystroke(&mut self, code: keyboard::KeyCode) {
+        use keyboard::KeyCode::*;
+        match code {
+            A => self.counter += 1,
+            _ => {}
+        }
+    }
+}
+
 fn main() {
-    let (tx, rx) = unbounded();
-
-    SENDER.set(SyncWrapper::new(tx.clone())).unwrap();
-
-    let hook_id = unsafe { SetWindowsHookExA(WH_KEYBOARD_LL, Some(hook_callback), std::ptr::null_mut(), 0) };
+    let hook_id =
+        unsafe { SetWindowsHookExA(WH_KEYBOARD_LL, Some(hook_callback), std::ptr::null_mut(), 0) };
 
     if hook_id == std::ptr::null_mut() {
         eprintln!("Could not create Hook -> {}", Win32Error::new());
         exit(2);
-    } else {
-        println!("{:?}", hook_id);
     }
 
-    Example::run(Settings::default());
+    if let Err(e) = Example::run(Settings::default()) {
+        eprintln!("Application failed! ({:?})", e);
+    }
 
-    unsafe { UnhookWindowsHookEx(hook_id); }
+    unsafe {
+        UnhookWindowsHookEx(hook_id);
+    }
 }
 
-unsafe extern "system" fn hook_callback(code: i32, wParam: usize, lParam: isize) -> isize {
-    if code < 0 {
-        return CallNextHookEx(std::ptr::null_mut(), code, wParam, lParam);
-    } else {
-
-        if wParam == WM_KEYDOWN as usize {
-            let s = unsafe { *(lParam as LPKBDLLHOOKSTRUCT) };
-            println!("{:?}", KeyCode::from(s.vkCode));
-            if KeyCode::from(s.vkCode) == KeyCode::F12 {
-                println!("F12 pressed");
-                if let Some(sender) = SENDER.get() {
-                    sender.get().unbounded_send(Message::IncreaseCounter);
-                }
+unsafe extern "system" fn hook_callback(code: i32, w_param: usize, l_param: isize) -> isize {
+    if w_param == WM_KEYDOWN as usize {
+        let s = *(l_param as LPKBDLLHOOKSTRUCT);
+        if let Some(sender) = SENDER.get() {
+            if let Err(e) = sender.get().unbounded_send(Message::KeyEvent(KeyCode::from(s.vkCode))) {
+                eprintln!("Failed to send Message! ({:?})", e);
             }
         }
-        0
     }
+    return CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param);
 }
 
-struct InputReceiver {
-    rx: UnboundedReceiver<Message>
+enum State {
+    Starting,
+    Ready(UnboundedReceiver<Message>),
 }
 
-impl InputReceiver {
-    fn new(rx: UnboundedReceiver<Message>) -> InputReceiver {
-        InputReceiver {
-            rx
+#[derive(Debug)]
+struct KbWorker {
+    internal_hash: u64,
+}
+
+impl KbWorker {
+    pub fn new() -> KbWorker {
+        KbWorker {
+            internal_hash: rand::thread_rng().next_u64(),
         }
     }
-}
 
-impl iced::futures::Stream for InputReceiver {
-    type Item = Message;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Ok(a) = self.rx.try_next() {
-            Poll::from(a)
-        } else {
-            Poll::from(None)
-        }
+    pub fn subscription(&self) -> Subscription<Message> {
+        iced::Subscription::from_recipe(KbWorker {
+            internal_hash: self.internal_hash,
+        })
     }
 }
 
-impl<H: std::hash::Hasher, I> iced_native::subscription::Recipe<H, I> for InputReceiver {
+impl<H, I> iced_native::subscription::Recipe<H, I> for KbWorker
+where
+    H: std::hash::Hasher,
+{
     type Output = Message;
 
     fn hash(&self, state: &mut H) {
         use std::hash::Hash;
 
         std::any::TypeId::of::<Self>().hash(state);
-        let num = rand::thread_rng().next_u64();
-        num.hash(state);
+        self.internal_hash.hash(state);
     }
 
-    fn stream(mut self: Box<Self>, _: BoxStream<I>) -> BoxStream<Self::Output> {
-        // let mut rx = self.rx.take().unwrap();
-        Box::pin(self)
+    fn stream(self: Box<Self>, _: BoxStream<I>) -> BoxStream<Self::Output> {
+        Box::pin(futures::stream::unfold(
+            State::Starting,
+            |state| async move {
+                match state {
+                    State::Starting => {
+                        let (sender, receiver) = unbounded();
+
+                        Some((Message::Ready(sender), State::Ready(receiver)))
+                    }
+                    State::Ready(mut receiver) => {
+                        use iced_native::futures::StreamExt;
+
+                        let input = receiver.select_next_some().await;
+
+                        Some((input, State::Ready(receiver)))
+                    }
+                }
+            },
+        ))
     }
 }
