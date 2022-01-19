@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use rust_win32error::*;
 use winapi::um::winuser::{
     CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, LPKBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
@@ -18,6 +19,7 @@ use iced_native::event::Status;
 use iced_native::{Column, Slider};
 use log::error;
 use std::process::exit;
+use iced::futures::future::err;
 
 use once_cell::sync::OnceCell;
 use rand::RngCore;
@@ -25,21 +27,18 @@ use rand::RngCore;
 mod input;
 mod keyboard;
 mod util;
+mod ui;
+mod id;
 
 use input::OsInput;
 
 #[derive(Debug)]
 struct Example {
-    counter: isize,
     kb_worker: KbWorker,
     slider: iced::slider::State,
     scrollable_state: iced::scrollable::State,
-    input_state1: iced::text_input::State,
-    text1: String,
-    input_state2: iced::text_input::State,
-    text2: String,
     slider_value: f32,
-    button: iced::button::State,
+    songs: HashMap<u64, ui::SongListing>
 }
 
 #[derive(Debug, Clone)]
@@ -47,9 +46,8 @@ pub enum Message {
     Ready(UnboundedSender<Message>),
     KeyEvent(input::keycode::KeyCode),
     VolumeChanged(f32),
-    Text1Changed(String),
-    Text2Changed(String),
-    DeletePressed,
+    SongListingChanged(u64, ui::SongListingEvent),
+    SongListingDeleted(u64)
 }
 
 impl Application for Example {
@@ -60,23 +58,18 @@ impl Application for Example {
     fn new(_: Self::Flags) -> (Self, Command<Self::Message>) {
         (
             Example {
-                counter: 0,
                 kb_worker: KbWorker::new(),
                 slider: iced::slider::State::new(),
                 scrollable_state: iced::scrollable::State::new(),
-                input_state1: iced::text_input::State::new(),
-                text1: String::new(),
-                input_state2: iced::text_input::State::new(),
-                text2: String::new(),
                 slider_value: 0.0,
-                button: iced::button::State::new(),
+                songs: HashMap::new()
             },
             Command::none(),
         )
     }
 
     fn title(&self) -> String {
-        format!("Counter - {}", self.counter)
+        format!("Metronome")
     }
 
     fn update(&mut self, message: Self::Message, _: &mut Clipboard) -> Command<Self::Message> {
@@ -90,15 +83,15 @@ impl Application for Example {
             Message::VolumeChanged(vol) => {
                 self.slider_value = vol;
             }
-            Message::Text1Changed(s) => {
-                self.text1 = s;
+            Message::SongListingChanged(id, event) => {
+                if let Some(song) = self.songs.get_mut(&id) {
+                    song.apply_event(event);
+                }
             }
-            Message::Text2Changed(s) => {
-                self.text2 = s;
+            Message::SongListingDeleted(id) => {
+                self.songs.remove(&id);
             }
-            Message::DeletePressed => {
-                println!("Hello World!");
-            }
+            _ => {}
         }
         Command::none()
     }
@@ -111,7 +104,7 @@ impl Application for Example {
                     if let iced_native::Event::Keyboard(
                         iced_native::keyboard::Event::KeyPressed {
                             key_code,
-                            modifiers,
+                            modifiers: _,
                         },
                     ) = event
                     {
@@ -162,40 +155,10 @@ impl Application for Example {
 
         let mut scrollable = Scrollable::new(&mut self.scrollable_state)
             .width(Length::Fill)
-            .push(
-                Row::new()
-                    .height(Length::Units(30))
-                    .push(
-                        TextInput::new(
-                            &mut self.input_state1,
-                            "1",
-                            &self.text1,
-                            Message::Text1Changed,
-                        )
-                        .width(Length::FillPortion(45)),
-                    )
-                    .push(
-                        TextInput::new(
-                            &mut self.input_state2,
-                            "2",
-                            &self.text2,
-                            Message::Text2Changed,
-                        )
-                        .width(Length::FillPortion(45)),
-                    )
-                    .push(
-                        Button::new(&mut self.button, Text::new("Del"))
-                            .width(Length::FillPortion(10))
-                            .on_press(Message::DeletePressed),
-                    )
-                    .spacing(10),
-            )
             .spacing(10);
 
-        for i in 0..self.counter {
-            scrollable = scrollable
-                .push(Row::new().push(Text::new(format!("Text {}", i))))
-                .height(Length::Units(30));
+        for (_, song) in &mut self.songs {
+            scrollable = scrollable.push(song.element(Length::Units(30)));
         }
 
         let grid: Element<_> = Row::new()
@@ -230,8 +193,10 @@ impl Example {
     fn handle_keystroke(&mut self, code: input::keycode::KeyCode) {
         use input::keycode::KeyCode::*;
         match code {
-            UpArrow => self.counter += 1,
-            DownArrow => self.counter -= 1,
+            UpArrow => {
+                let song = ui::SongListing::new("Title", 128);
+                self.songs.insert(song.id(), song);
+            }
             _ => {}
         }
     }
@@ -239,7 +204,7 @@ impl Example {
 
 fn main() {
     simplelog::TermLogger::init(
-        simplelog::LevelFilter::Trace,
+        simplelog::LevelFilter::Error,
         simplelog::Config::default(),
         simplelog::TerminalMode::Mixed,
         simplelog::ColorChoice::Auto,
