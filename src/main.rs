@@ -1,44 +1,32 @@
+use rust_win32error::*;
 use winapi::um::winuser::{
     CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, LPKBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
     WM_KEYDOWN,
 };
-use rust_win32error::*;
 
 // TODO https://www.hackster.io/HiAmadeus/analog-inputs-on-windows-10-raspberry-pi-using-adc-493ab9
 
-use iced::{executor, Application, Clipboard, Command, Container, Element, HorizontalAlignment, Length, Settings, Text, VerticalAlignment, Row, Scrollable, TextInput, Button};
+use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use iced::{
+    executor, Application, Button, Clipboard, Command, Container, Element, HorizontalAlignment,
+    Length, Row, Scrollable, Settings, Text, TextInput, VerticalAlignment,
+};
 use iced_futures::{futures, BoxStream};
 use iced_native::subscription::Subscription;
-use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 
-use std::process::exit;
-use iced_native::{Column, Slider};
 use iced_native::event::Status;
+use iced_native::{Column, Slider};
+use log::error;
+use std::process::exit;
 
 use once_cell::sync::OnceCell;
 use rand::RngCore;
 
+mod input;
 mod keyboard;
-use keyboard::KeyCode;
+mod util;
 
-static SENDER: OnceCell<SyncWrapper> = OnceCell::new();
-
-#[derive(Debug)]
-struct SyncWrapper {
-    sender: UnboundedSender<Message>,
-}
-
-unsafe impl Sync for SyncWrapper {}
-
-impl SyncWrapper {
-    fn get(&self) -> UnboundedSender<Message> {
-        self.sender.clone()
-    }
-
-    fn new(sender: UnboundedSender<Message>) -> SyncWrapper {
-        SyncWrapper { sender }
-    }
-}
+use input::OsInput;
 
 #[derive(Debug)]
 struct Example {
@@ -51,17 +39,17 @@ struct Example {
     input_state2: iced::text_input::State,
     text2: String,
     slider_value: f32,
-    button: iced::button::State
+    button: iced::button::State,
 }
 
 #[derive(Debug, Clone)]
-enum Message {
+pub enum Message {
     Ready(UnboundedSender<Message>),
-    KeyEvent(keyboard::KeyCode),
+    KeyEvent(input::keycode::KeyCode),
     VolumeChanged(f32),
     Text1Changed(String),
     Text2Changed(String),
-    DeletePressed
+    DeletePressed,
 }
 
 impl Application for Example {
@@ -81,7 +69,7 @@ impl Application for Example {
                 input_state2: iced::text_input::State::new(),
                 text2: String::new(),
                 slider_value: 0.0,
-                button: iced::button::State::new()
+                button: iced::button::State::new(),
             },
             Command::none(),
         )
@@ -94,10 +82,7 @@ impl Application for Example {
     fn update(&mut self, message: Self::Message, _: &mut Clipboard) -> Command<Self::Message> {
         match message {
             Message::Ready(sender) => {
-                if let Err(_) = SENDER.set(SyncWrapper::new(sender)) {
-                    eprintln!("Could not set sender!");
-                    exit(4)
-                }
+                input::add_sender(sender);
             }
             Message::KeyEvent(code) => {
                 self.handle_keystroke(code);
@@ -121,45 +106,55 @@ impl Application for Example {
     fn subscription(&self) -> Subscription<Self::Message> {
         Subscription::batch([
             self.kb_worker.subscription(),
-            iced_native::subscription::events_with(|event, status| {
-                match status {
-                    Status::Ignored => {
-                        if let iced_native::Event::Keyboard(iced_native::keyboard::Event::KeyPressed { key_code, modifiers }) = event {
-                            Some(key_code)
-                        } else {
-                            None
-                        }
+            iced_native::subscription::events_with(|event, status| match status {
+                Status::Ignored => {
+                    if let iced_native::Event::Keyboard(
+                        iced_native::keyboard::Event::KeyPressed {
+                            key_code,
+                            modifiers,
+                        },
+                    ) = event
+                    {
+                        Some(key_code)
+                    } else {
+                        None
                     }
-                    Status::Captured => None
                 }
-            }).map(|e| Message::KeyEvent(keyboard::KeyCode::from(e)))
+                Status::Captured => None,
+            })
+            .map(|e| Message::KeyEvent(input::keycode::KeyCode::from(e))),
         ])
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
         let tempo: Element<_> = Row::new()
-            .push(Column::new()
-                .width(Length::FillPortion(70))
-                .push(Text::new("AAA")
-                    .height(Length::FillPortion(70))
-                    .size(100)
-                    .vertical_alignment(VerticalAlignment::Center)
-                )
-                .push(Text::new("AAA")
-                    .height(Length::FillPortion(30))
-                    .size(30)
-                    .vertical_alignment(VerticalAlignment::Center)
-                )
+            .push(
+                Column::new()
+                    .width(Length::FillPortion(70))
+                    .push(
+                        Text::new("AAA")
+                            .height(Length::FillPortion(70))
+                            .size(100)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    )
+                    .push(
+                        Text::new("AAA")
+                            .height(Length::FillPortion(30))
+                            .size(30)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    ),
             )
-            .push(Column::new()
-                .width(Length::FillPortion(30))
-                .push(Text::new("").height(Length::FillPortion(70)))
-                .push(Text::new("AAA")
-                    .height(Length::FillPortion(30))
-                    .size(30)
-                    .horizontal_alignment(HorizontalAlignment::Right)
-                    .vertical_alignment(VerticalAlignment::Center)
-                )
+            .push(
+                Column::new()
+                    .width(Length::FillPortion(30))
+                    .push(Text::new("").height(Length::FillPortion(70)))
+                    .push(
+                        Text::new("AAA")
+                            .height(Length::FillPortion(30))
+                            .size(30)
+                            .horizontal_alignment(HorizontalAlignment::Right)
+                            .vertical_alignment(VerticalAlignment::Center),
+                    ),
             )
             .height(Length::FillPortion(30))
             .padding(10)
@@ -167,46 +162,60 @@ impl Application for Example {
 
         let mut scrollable = Scrollable::new(&mut self.scrollable_state)
             .width(Length::Fill)
-            .push(Row::new()
-                .height(Length::Units(30))
-                .push(TextInput::new(&mut self.input_state1, "1", &self.text1, Message::Text1Changed)
-                    .width(Length::FillPortion(45))
-                )
-                .push(TextInput::new(&mut self.input_state2, "2", &self.text2, Message::Text2Changed)
-                    .width(Length::FillPortion(45))
-                )
-                .push(Button::new(&mut self.button, Text::new("Del"))
-                    .width(Length::FillPortion(10))
-                    .on_press(Message::DeletePressed)
-                )
-                .spacing(10))
+            .push(
+                Row::new()
+                    .height(Length::Units(30))
+                    .push(
+                        TextInput::new(
+                            &mut self.input_state1,
+                            "1",
+                            &self.text1,
+                            Message::Text1Changed,
+                        )
+                        .width(Length::FillPortion(45)),
+                    )
+                    .push(
+                        TextInput::new(
+                            &mut self.input_state2,
+                            "2",
+                            &self.text2,
+                            Message::Text2Changed,
+                        )
+                        .width(Length::FillPortion(45)),
+                    )
+                    .push(
+                        Button::new(&mut self.button, Text::new("Del"))
+                            .width(Length::FillPortion(10))
+                            .on_press(Message::DeletePressed),
+                    )
+                    .spacing(10),
+            )
             .spacing(10);
 
-        for i in 0..100 {
-            scrollable = scrollable.push(Row::new().push(
-                Text::new(format!("Text {}", i)))
-            )
-            .height(Length::Units(30));
+        for i in 0..self.counter {
+            scrollable = scrollable
+                .push(Row::new().push(Text::new(format!("Text {}", i))))
+                .height(Length::Units(30));
         }
 
-        let grid: Element<_>  = Row::new()
+        let grid: Element<_> = Row::new()
             .height(Length::FillPortion(60))
-            .push(
-                scrollable
-            )
-            .padding(10).into();
+            .push(scrollable)
+            .padding(10)
+            .into();
 
         let volume: Element<_> = Row::new()
             .padding(10)
-            .push(Slider::new(&mut self.slider, 0.0..=100.0, self.slider_value, Message::VolumeChanged))
+            .push(Slider::new(
+                &mut self.slider,
+                0.0..=100.0,
+                self.slider_value,
+                Message::VolumeChanged,
+            ))
             .height(Length::FillPortion(10))
             .into();
 
-        let combined: Element<_> = Column::new()
-            .push(tempo)
-            .push(grid)
-            .push(volume)
-            .into();
+        let combined: Element<_> = Column::new().push(tempo).push(grid).push(volume).into();
 
         Container::new(combined)
             .width(Length::Fill)
@@ -218,47 +227,35 @@ impl Application for Example {
 }
 
 impl Example {
-    fn handle_keystroke(&mut self, code: keyboard::KeyCode) {
-        use keyboard::KeyCode::*;
+    fn handle_keystroke(&mut self, code: input::keycode::KeyCode) {
+        use input::keycode::KeyCode::*;
         match code {
-            A => self.counter += 1,
+            UpArrow => self.counter += 1,
+            DownArrow => self.counter -= 1,
             _ => {}
         }
     }
 }
 
 fn main() {
-    let hook_id =
-        unsafe { SetWindowsHookExA(WH_KEYBOARD_LL, Some(hook_callback), std::ptr::null_mut(), 0) };
+    simplelog::TermLogger::init(
+        simplelog::LevelFilter::Trace,
+        simplelog::Config::default(),
+        simplelog::TerminalMode::Mixed,
+        simplelog::ColorChoice::Auto,
+    );
 
-    if hook_id == std::ptr::null_mut() {
-        eprintln!("Could not create Hook -> {}", Win32Error::new());
-        exit(2);
-    }
+    let input_handler = input::init();
 
     let mut settings = Settings::default();
     settings.window = Default::default();
     settings.window.min_size = Some((600, 400));
 
     if let Err(e) = Example::run(settings) {
-        eprintln!("Application failed! ({:?})", e);
+        error!("Application failed! ({:?})", e);
     }
 
-    unsafe {
-        UnhookWindowsHookEx(hook_id);
-    }
-}
-
-unsafe extern "system" fn hook_callback(code: i32, w_param: usize, l_param: isize) -> isize {
-    if w_param == WM_KEYDOWN as usize {
-        let s = *(l_param as LPKBDLLHOOKSTRUCT);
-        if let Some(sender) = SENDER.get() {
-            if let Err(e) = sender.get().unbounded_send(Message::KeyEvent(KeyCode::from(s.vkCode))) {
-                eprintln!("Failed to send Message! ({:?})", e);
-            }
-        }
-    }
-    return CallNextHookEx(std::ptr::null_mut(), code, w_param, l_param);
+    input_handler.on_shutdown();
 }
 
 enum State {
