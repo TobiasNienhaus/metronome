@@ -1,7 +1,6 @@
 use iced::{
     Element, Row, TextInput, Length, Button, Text
 };
-use iced_aw::number_input::{self, NumberInput};
 use iced_native::Widget;
 use log::error;
 use rand::RngCore;

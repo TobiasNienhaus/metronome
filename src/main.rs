@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+
 use rust_win32error::*;
 use winapi::um::winuser::{
     CallNextHookEx, SetWindowsHookExA, UnhookWindowsHookEx, LPKBDLLHOOKSTRUCT, WH_KEYBOARD_LL,
@@ -17,7 +18,7 @@ use iced_native::subscription::Subscription;
 
 use iced_native::event::Status;
 use iced_native::{Column, Slider};
-use log::error;
+use log::{debug, error};
 use std::process::exit;
 use iced::futures::future::err;
 
@@ -29,12 +30,16 @@ mod keyboard;
 mod util;
 mod ui;
 mod id;
+mod audio;
 
 use input::OsInput;
+use audio::AudioMessage;
+use crate::audio::AudioHandle;
 
 #[derive(Debug)]
 struct Example {
     kb_worker: KbWorker,
+    audio_handle: AudioHandle,
     slider: iced::slider::State,
     scrollable_state: iced::scrollable::State,
     slider_value: f32,
@@ -59,6 +64,7 @@ impl Application for Example {
         (
             Example {
                 kb_worker: KbWorker::new(),
+                audio_handle: audio::setup(),
                 slider: iced::slider::State::new(),
                 scrollable_state: iced::scrollable::State::new(),
                 slider_value: 0.0,
@@ -82,6 +88,7 @@ impl Application for Example {
             }
             Message::VolumeChanged(vol) => {
                 self.slider_value = vol;
+                self.audio_handle.send(AudioMessage::SetVolume(vol as u16))
             }
             Message::SongListingChanged(id, event) => {
                 if let Some(song) = self.songs.get_mut(&id) {
@@ -171,7 +178,7 @@ impl Application for Example {
             .padding(10)
             .push(Slider::new(
                 &mut self.slider,
-                0.0..=100.0,
+                0.0..=1000.0,
                 self.slider_value,
                 Message::VolumeChanged,
             ))
@@ -197,18 +204,37 @@ impl Example {
                 let song = ui::SongListing::new("Title", 128);
                 self.songs.insert(song.id(), song);
             }
+            SpaceBar => {
+                self.audio_handle.send(AudioMessage::Toggle)
+            }
             _ => {}
         }
     }
 }
 
+pub const fn bpm_to_ns(bpm: u128) -> u128 {
+    (60000 * 1000000) / bpm
+}
+
 fn main() {
-    simplelog::TermLogger::init(
-        simplelog::LevelFilter::Error,
-        simplelog::Config::default(),
-        simplelog::TerminalMode::Mixed,
-        simplelog::ColorChoice::Auto,
-    );
+    fern::Dispatch::new()
+        .filter(|metadata| {
+            metadata.target().starts_with("metronome")
+        })
+        .format(|out, message, record| {
+            out.finish(format_args!(
+                "[{}] [{} -> {}:{}] [{}]\n-> {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+                record.module_path().or_else(|| { Some("unknown") }).unwrap(),
+                record.file().or_else(|| { Some("unknown") }).unwrap(),
+                record.line().map_or(String::from("unknown"), |v| { v.to_string() }),
+                record.level(),
+                message
+            ))
+        })
+        .level(log::LevelFilter::Trace)
+        .chain(std::io::stdout())
+        .apply().unwrap();
 
     let input_handler = input::init();
 

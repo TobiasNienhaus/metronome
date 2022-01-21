@@ -13,9 +13,13 @@ rust_win32error = "0.8.0"
 rand="0.8.4"
 once_cell = "1.9.0"
 futures-channel = "0.3.19"
+#cpal = { version = "~0.13", features = ["asio"] }
+cpal = { git = "https://github.com/TobiasNienhaus/cpal", features = ["asio"] }
 log = "0.4.14"
-simplelog = "0.11.2"
-iced_aw = { git = "https://github.com/iced-rs/iced_aw", default-features = false, features = ["number_input"] }
+fern = "0.6.0"
+chrono = "0.4.19"
+anyhow = "1.0.52"
+thread-priority = "0.4.1"
 
 [dependencies.winapi]
 version = "0.3.9"

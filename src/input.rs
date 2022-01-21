@@ -23,7 +23,11 @@ pub trait OsInput {
 pub fn init() -> impl OsInput {
     #[cfg(target_os = "windows")]
     {
-        WindowsInput::new()
+        return WindowsInput::new();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        todo!()
     }
 }
 

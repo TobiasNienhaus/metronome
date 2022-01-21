@@ -1,5 +1,5 @@
 use futures_channel::mpsc::UnboundedSender;
-use log::{error, trace};
+use log::{debug, error, trace};
 use once_cell::sync::OnceCell;
 use rust_win32error::Win32Error;
 use std::process::exit;
@@ -37,6 +37,12 @@ impl OsInput for WindowsInput {
         unsafe {
             UnhookWindowsHookEx(self.hook_id);
         }
+    }
+}
+
+impl Drop for WindowsInput {
+    fn drop(&mut self) {
+        debug!("Drop");
     }
 }
 
