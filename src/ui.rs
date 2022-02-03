@@ -14,9 +14,15 @@ pub enum SongListingEvent {
     BpmChange(String)
 }
 
+// Somehow have this only work, if Option is not none
+// Also only serialize the inner values, so first number than file
+enum BpmSetting {
+    Value(Option<u16>),
+    File(String)
+}
+
 #[derive(Debug)]
 pub struct SongListing {
-    id: u64,
     title: String,
     bpm: Option<u16>,
     title_input: iced::text_input::State,
@@ -27,17 +33,12 @@ pub struct SongListing {
 impl SongListing {
     pub fn new(title: &str, bpm: u16) -> SongListing {
         SongListing {
-            id: id::new(),
             title: String::from(title),
             bpm: Some(bpm),
             title_input: iced::text_input::State::new(),
             bpm_input: iced::text_input::State::new(),
             button: iced::button::State::new()
         }
-    }
-
-    pub fn id(&self) -> u64 {
-        self.id
     }
 
     pub fn title(&self) -> &str {
@@ -50,6 +51,10 @@ impl SongListing {
 
     pub fn bpm(&self) -> Option<u16> {
         self.bpm
+    }
+
+    pub fn bpm_str(&self, default: &str) -> String {
+        self.bpm.map_or(String::from(default), |opt| { format!("{}", opt) })
     }
 
     pub fn set_bpm(&mut self, val: u16) {
@@ -69,18 +74,14 @@ impl SongListing {
         }
     }
 
-    pub fn element(&mut self, height: Length) -> Row<Message> {
-        let id = self.id;
+    pub fn editable_element(&mut self, height: Length) -> Row<Message> {
         Row::new()
             .push(
                 TextInput::new(
                     &mut self.title_input,
                     "1",
                     &self.title,
-                    move |v| {
-                        error!("ID: {}", id);
-                        Message::SongListingChanged(id, SongListingEvent::TitleChange(v))
-                    }
+                    move |v| { Message::None }
                 ).width(Length::FillPortion(45)),
             )
             .push(
@@ -88,15 +89,23 @@ impl SongListing {
                     &mut self.bpm_input,
                     "BPM",
                     &*self.bpm.map_or(String::new(), |opt| { format!("{}", opt) }),
-                    move |v| {
-                        Message::SongListingChanged(id, SongListingEvent::BpmChange(v))
-                    }
+                    move |v| { Message::None }
                 ).width(Length::FillPortion(45)),
             )
             .push(
                 Button::new(&mut self.button, Text::new("Del"))
                     .width(Length::FillPortion(10))
-                    .on_press(Message::SongListingDeleted(self.id)),
+                    .on_press(Message::None),
+            )
+            .spacing(10)
+            .height(height)
+    }
+
+    pub fn element(&self, height: Length) -> Row<Message> {
+        Row::new()
+            .push(Text::new(&self.title).width(Length::FillPortion(50)),
+            )
+            .push(Text::new(format!("{} BPM", self.bpm.unwrap())).width(Length::FillPortion(50)),
             )
             .spacing(10)
             .height(height)

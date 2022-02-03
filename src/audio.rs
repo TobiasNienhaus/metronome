@@ -117,71 +117,83 @@ fn audio_thread(rx: Receiver<InternalAudioMessage>) {
         let start = std::time::Instant::now();
         let sleep_start = start.add(std::time::Duration::from_nanos(busy_timing as u64));
         // TODO warn if the delta gets to big from the requests value
-        let (message, continue_running) = get_message(paused, &rx);
+        let (messages, continue_running) = get_message(paused, &rx);
 
         running = continue_running;
 
         // TODO somehow consume all messages
         if continue_running {
-            if let Some(msg) = message {
+            let mut volume_to_change_to = None;
+            let mut new_paused_state = paused;
+            for msg in messages {
                 match msg {
                     InternalAudioMessage::External(msg) => {
                         match msg {
-                            AudioMessage::Play => paused = false,
-                            AudioMessage::Pause => {
-                                paused = true;
-                                AUDIO_FLAG.store(false, SyncOrdering::SeqCst);
-                            },
-                            AudioMessage::Toggle => {
-                                paused = !paused;
-                                if paused {
-                                    AUDIO_FLAG.store(false, SyncOrdering::SeqCst);
-                                }
-                            }
+                            AudioMessage::Play => new_paused_state = false,
+                            AudioMessage::Pause => new_paused_state = true,
+                            AudioMessage::Toggle => new_paused_state = !new_paused_state,
                             AudioMessage::SetBpm(bpm) => {
                                 debug!("Setting BPM to {}", bpm);
                                 timing = util::bpm_to_ns(bpm as u128);
                                 sleep_timing = timing - busy_timing;
                             }
                             AudioMessage::SetVolume(vol) => {
-                                AUDIO_VOLUME.store(vol, SyncOrdering::SeqCst);
+                                volume_to_change_to = Some(vol);
                             }
                         }
                     }
                     InternalAudioMessage::Shutdown => running = false
                 }
             }
+            if let Some(volume) = volume_to_change_to {
+                AUDIO_VOLUME.store(volume, SyncOrdering::SeqCst);
+            }
+
+            if paused != new_paused_state {
+                paused = new_paused_state;
+                if paused {
+                    AUDIO_FLAG.store(false, SyncOrdering::SeqCst);
+                }
+            }
 
             if !paused {
                 util::busy_sleep_from(start, busy_timing);
                 AUDIO_FLAG.store(false, SyncOrdering::SeqCst);
+                // TODO set all values in the smaller phase (usually silent time)
                 util::busy_sleep_from(sleep_start, sleep_timing);
             }
         }
     }
 }
 
-fn get_message(paused: bool, rx: &Receiver<InternalAudioMessage>) -> (Option<InternalAudioMessage>, bool) {
+fn get_message(paused: bool, rx: &Receiver<InternalAudioMessage>) -> (Vec<InternalAudioMessage>, bool) {
+    let mut ret = Vec::new();
+    let mut should_continue = true;
+
     if !paused {
-        match rx.try_recv() {
-            Ok(msg) => (Some(msg), true),
-            Err(e) => match e {
-                TryRecvError::Empty => (None, true),
-                TryRecvError::Disconnected => {
-                    error!("Audio controller thread channel hung up!");
-                    (None, false)
+        'breakable: loop {
+            match rx.try_recv() {
+                Ok(msg) => ret.push(msg),
+                Err(e) => {
+                    if let TryRecvError::Disconnected = e {
+                        error!("Audio controller thread channel hung up!");
+                        should_continue = false;
+                    }
+                    break 'breakable;
                 }
             }
         }
     } else {
         match rx.recv() {
-            Ok(msg) => (Some(msg), true),
+            Ok(msg) => ret.push(msg),
             Err(_) => {
                 error!("Audio controller thread channel hung up!");
-                (None, false)
+                should_continue = false;
             }
         }
-    }
+    };
+
+    (ret, should_continue)
 }
 
 fn sample_next(o: &mut SampleRequestOptions, active: bool, vol: u16) -> f32 {

@@ -11,19 +11,21 @@ use winapi::um::winuser::{
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use iced::{
     executor, Application, Button, Clipboard, Command, Container, Element, HorizontalAlignment,
-    Length, Row, Scrollable, Settings, Text, TextInput, VerticalAlignment,
+    Length, Row, Scrollable, Settings, Text, TextInput, VerticalAlignment, Space
 };
 use iced_futures::{futures, BoxStream};
 use iced_native::subscription::Subscription;
 
 use iced_native::event::Status;
-use iced_native::{Column, Slider};
+use iced_native::{Align, Column, Slider};
 use log::{debug, error};
 use std::process::exit;
 use iced::futures::future::err;
 
 use once_cell::sync::OnceCell;
-use rand::RngCore;
+use rand::{Rng, RngCore};
+
+use serde_yaml;
 
 mod input;
 mod keyboard;
@@ -31,10 +33,12 @@ mod util;
 mod ui;
 mod id;
 mod audio;
+mod song_listing;
 
 use input::OsInput;
 use audio::AudioMessage;
 use crate::audio::AudioHandle;
+use crate::song_listing::FileSongListing;
 
 #[derive(Debug)]
 struct Example {
@@ -43,7 +47,10 @@ struct Example {
     slider: iced::slider::State,
     scrollable_state: iced::scrollable::State,
     slider_value: f32,
-    songs: HashMap<u64, ui::SongListing>
+    songs: Vec<ui::SongListing>,
+    current: usize,
+    play_button: iced::button::State,
+    pause_button: iced::button::State,
 }
 
 #[derive(Debug, Clone)]
@@ -51,8 +58,8 @@ pub enum Message {
     Ready(UnboundedSender<Message>),
     KeyEvent(input::keycode::KeyCode),
     VolumeChanged(f32),
-    SongListingChanged(u64, ui::SongListingEvent),
-    SongListingDeleted(u64)
+    AudioMessage(audio::AudioMessage),
+    None
 }
 
 impl Application for Example {
@@ -61,6 +68,17 @@ impl Application for Example {
     type Flags = ();
 
     fn new(_: Self::Flags) -> (Self, Command<Self::Message>) {
+        let mut songs = Vec::new();
+
+        for i in 0..30 {
+            songs.push(
+                ui::SongListing::new(
+                    &format!("Song {}", i),
+                    rand::thread_rng().gen_range(50..200)
+                )
+            )
+        }
+
         (
             Example {
                 kb_worker: KbWorker::new(),
@@ -68,7 +86,10 @@ impl Application for Example {
                 slider: iced::slider::State::new(),
                 scrollable_state: iced::scrollable::State::new(),
                 slider_value: 0.0,
-                songs: HashMap::new()
+                songs,
+                current: 0,
+                play_button: iced::button::State::new(),
+                pause_button: iced::button::State::new()
             },
             Command::none(),
         )
@@ -90,15 +111,10 @@ impl Application for Example {
                 self.slider_value = vol;
                 self.audio_handle.send(AudioMessage::SetVolume(vol as u16))
             }
-            Message::SongListingChanged(id, event) => {
-                if let Some(song) = self.songs.get_mut(&id) {
-                    song.apply_event(event);
-                }
+            Message::AudioMessage(msg) => {
+                self.audio_handle.send(msg)
             }
-            Message::SongListingDeleted(id) => {
-                self.songs.remove(&id);
-            }
-            _ => {}
+            Message::None => {}
         }
         Command::none()
     }
@@ -127,44 +143,56 @@ impl Application for Example {
     }
 
     fn view(&mut self) -> Element<'_, Self::Message> {
-        let tempo: Element<_> = Row::new()
-            .push(
-                Column::new()
-                    .width(Length::FillPortion(70))
-                    .push(
-                        Text::new("AAA")
-                            .height(Length::FillPortion(70))
-                            .size(100)
-                            .vertical_alignment(VerticalAlignment::Center),
-                    )
-                    .push(
-                        Text::new("AAA")
-                            .height(Length::FillPortion(30))
-                            .size(30)
-                            .vertical_alignment(VerticalAlignment::Center),
-                    ),
-            )
-            .push(
-                Column::new()
-                    .width(Length::FillPortion(30))
-                    .push(Text::new("").height(Length::FillPortion(70)))
-                    .push(
-                        Text::new("AAA")
-                            .height(Length::FillPortion(30))
-                            .size(30)
-                            .horizontal_alignment(HorizontalAlignment::Right)
-                            .vertical_alignment(VerticalAlignment::Center),
-                    ),
-            )
-            .height(Length::FillPortion(30))
-            .padding(10)
-            .into();
+        let mut tempo = Row::new()
+            .height(Length::Units(170))
+            .padding(20);
+
+        if let Some(song) = self.songs.get(self.current) {
+            tempo = tempo.push(Column::new()
+                .width(Length::FillPortion(70))
+                .push(
+                    Text::new(song.bpm_str(""))
+                        .size(100),
+                )
+                .push(
+                    Text::new(song.title())
+                        .size(30),
+                )
+            );
+        } else {
+            tempo = tempo.push(Column::new().width(Length::FillPortion(70)));
+        }
+
+        if let Some(song) = self.songs.get(self.current + 1) {
+            tempo = tempo.push(Column::new()
+               .width(Length::FillPortion(30))
+                .push(
+                    Space::with_height(Length::Units(60))
+                )
+               .push(
+                   Text::new(song.bpm_str(""))
+                       .height(Length::FillPortion(70))
+                       .horizontal_alignment(HorizontalAlignment::Right)
+                       .size(60)
+               )
+               .push(
+                   Text::new(song.title())
+                       .height(Length::FillPortion(30))
+                       .horizontal_alignment(HorizontalAlignment::Right)
+                       .size(20)
+               )
+            );
+        } else {
+            tempo = tempo.push(Column::new().width(Length::FillPortion(30)));
+        }
+
+        let tempo: Element<_> = tempo.into();
 
         let mut scrollable = Scrollable::new(&mut self.scrollable_state)
             .width(Length::Fill)
             .spacing(10);
 
-        for (_, song) in &mut self.songs {
+        for song in self.songs.iter().skip(self.current + 1) {
             scrollable = scrollable.push(song.element(Length::Units(30)));
         }
 
@@ -180,8 +208,18 @@ impl Application for Example {
                 &mut self.slider,
                 0.0..=1000.0,
                 self.slider_value,
-                Message::VolumeChanged,
-            ))
+                Message::VolumeChanged)
+                .width(Length::FillPortion(80))
+            )
+            .push(Button::new(&mut self.play_button, Text::new("Play"))
+                .on_press(Message::AudioMessage(audio::AudioMessage::Play))
+                .width(Length::FillPortion(10))
+            )
+            .push(Button::new(&mut self.pause_button, Text::new("Pause"))
+                .on_press(Message::AudioMessage(audio::AudioMessage::Pause))
+                .width(Length::FillPortion(10))
+            )
+            .spacing(10)
             .height(Length::FillPortion(10))
             .into();
 
@@ -202,13 +240,27 @@ impl Example {
         match code {
             UpArrow => {
                 let song = ui::SongListing::new("Title", 128);
-                self.songs.insert(song.id(), song);
+                self.songs.push(song);
+            }
+            LeftArrow => {
+                self.current = self.current.saturating_sub(1);
+                self.apply_current();
+            }
+            RightArrow => {
+                if self.current < self.songs.len() - 1 {
+                    self.current += 1;
+                    self.apply_current();
+                }
             }
             SpaceBar => {
                 self.audio_handle.send(AudioMessage::Toggle)
             }
             _ => {}
         }
+    }
+
+    fn apply_current(&mut self) {
+        self.audio_handle.send(AudioMessage::SetBpm(self.songs.get(self.current).unwrap().bpm().unwrap()))
     }
 }
 
@@ -235,6 +287,18 @@ fn main() {
         .level(log::LevelFilter::Trace)
         .chain(std::io::stdout())
         .apply().unwrap();
+
+    let mut songs = Vec::new();
+    for _ in 0..100 {
+        songs.push(song_listing::FileSongListing::random());
+    }
+    let yaml = serde_yaml::to_string(&songs).unwrap();
+    println!("{}", yaml);
+    let songs2: Vec<song_listing::FileSongListing> = serde_yaml::from_str(&yaml).unwrap();
+    for song in songs2 {
+        println!("{}", song.title());
+    }
+    return;
 
     let input_handler = input::init();
 
