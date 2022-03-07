@@ -1,14 +1,16 @@
 use std::cmp::Ordering;
-use std::fmt::{Debug, Formatter, Write};
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::ops::Add;
 use std::process::exit;
 use std::sync::atomic::{Ordering as SyncOrdering, AtomicBool, AtomicU16};
 use std::sync::mpsc::{channel, Receiver, RecvError, Sender, SendError, TryRecvError};
 use std::thread::JoinHandle;
 use chrono::Timelike;
-use cpal::{Data, DefaultStreamConfigError, Devices, DevicesError, Sample, SampleFormat, SupportedOutputConfigs, SupportedStreamConfig, SupportedStreamConfigsError};
+use cpal::{Data, DefaultStreamConfigError, Devices, DevicesError, HostId, Sample, SampleFormat, SupportedOutputConfigs, SupportedStreamConfig, SupportedStreamConfigsError};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use log::{debug, error, warn};
+use std::any::Any;
+use std::cmp::Eq;
 
 use anyhow;
 
@@ -16,6 +18,87 @@ use super::util;
 
 static AUDIO_FLAG: AtomicBool = AtomicBool::new(false);
 static AUDIO_VOLUME: AtomicU16 = AtomicU16::new(0);
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum HostSelector {
+    #[cfg(target_os = "macos")]
+    CoreAudio,
+    #[cfg(target_os = "linux")]
+    Alsa,
+    #[cfg(target_os = "linux")]
+    Jack,
+    #[cfg(windows)]
+    Wasapi,
+    #[cfg(windows)]
+    Asio,
+}
+
+impl Into<cpal::HostId> for HostSelector {
+    fn into(self) -> HostId {
+        match self {
+            #[cfg(target_os = "macos")]
+            HostSelector::CoreAudio => cpal::HostId::CoreAudio,
+            #[cfg(target_os = "linux")]
+            HostSelector::Alsa => cpal::HostId::Alsa,
+            #[cfg(target_os = "linux")]
+            HostSelector::Jack => cpal::HostId::Jack,
+            #[cfg(windows)]
+            HostSelector::Wasapi => cpal::HostId::Wasapi,
+            #[cfg(windows)]
+            HostSelector::Asio => cpal::HostId::Asio,
+        }
+    }
+}
+
+impl From<cpal::HostId> for HostSelector {
+    fn from(id: HostId) -> Self {
+        match id {
+            #[cfg(target_os = "macos")]
+            cpal::HostId::CoreAudio => HostSelector::CoreAudio,
+            #[cfg(target_os = "linux")]
+            cpal::HostId::Alsa => HostSelector::Alsa,
+            #[cfg(target_os = "linux")]
+            cpal::HostId::Jack => HostSelector::Jack,
+            #[cfg(windows)]
+            cpal::HostId::Wasapi => HostSelector::Wasapi,
+            #[cfg(windows)]
+            cpal::HostId::Asio => HostSelector::Asio,
+        }
+    }
+}
+
+impl Display for HostSelector {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", match self {
+            #[cfg(target_os = "macos")]
+            HostSelector::CoreAudio => "CoreAudio",
+            #[cfg(target_os = "linux")]
+            HostSelector::Alsa => "Alsa",
+            #[cfg(target_os = "linux")]
+            HostSelector::Jack => "Jack",
+            #[cfg(windows)]
+            HostSelector::Wasapi => "Wasapi",
+            #[cfg(windows)]
+            HostSelector::Asio => "Asio",
+        })
+    }
+}
+
+impl HostSelector {
+    pub fn supported_cpal() -> Vec<cpal::HostId> {
+        cpal::available_hosts()
+    }
+
+    pub fn supported() -> Vec<HostSelector> {
+        Self::supported_cpal().into_iter().map(|h| h.into()).collect()
+    }
+
+    pub fn supported_output_devices(&self) -> Vec<String> {
+        let host = cpal::host_from_id((*self).into()).unwrap();
+        let dev = host.output_devices().unwrap();
+        dev.map(|d| d.name().unwrap()).collect()
+    }
+}
 
 #[derive(Debug, Copy, Clone)]
 enum InternalAudioMessage {
@@ -201,6 +284,7 @@ fn sample_next(o: &mut SampleRequestOptions, active: bool, vol: u16) -> f32 {
     if active {
         o.tone(659.25) * ((vol as f32) / 1000.)
     } else {
+        o.reset_clock();
         0.
     }
     // combination of several tones
@@ -215,14 +299,20 @@ pub struct SampleRequestOptions {
 
 impl SampleRequestOptions {
     fn tone(&self, freq: f32) -> f32 {
+        // TODO different waves apart from square wave
         match (self.sample_clock * freq * 2.0 * std::f32::consts::PI / self.sample_rate).sin().partial_cmp(&0.0).unwrap() {
             Ordering::Less => -1.,
             Ordering::Equal => 0.,
             Ordering::Greater => 1.
         }
     }
+
     fn tick(&mut self) {
         self.sample_clock = (self.sample_clock + 1.0) % self.sample_rate;
+    }
+
+    fn reset_clock(&mut self) {
+        self.sample_clock = 0.;
     }
 }
 
@@ -261,12 +351,14 @@ pub fn host_device_setup(
         cpal::default_host()
     };
 
+    debug!("{:?}", host.id());
+
     let device = host.output_devices()
         .unwrap()
         .filter(|d| d.name().unwrap().contains("Focusrite"))
         .next().unwrap_or(host.default_output_device()
                                                .ok_or_else(|| anyhow::Error::msg("Default output device is not available"))?);
-
+    debug!("{:?}", device.type_id());
     println!("Output device : {}", device.name()?);
 
     let config = device.default_output_config()?;

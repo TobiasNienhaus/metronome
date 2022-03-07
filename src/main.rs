@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::Deref;
 
 use rust_win32error::*;
 use winapi::um::winuser::{
@@ -9,10 +10,7 @@ use winapi::um::winuser::{
 // TODO https://www.hackster.io/HiAmadeus/analog-inputs-on-windows-10-raspberry-pi-using-adc-493ab9
 
 use futures_channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use iced::{
-    executor, Application, Button, Clipboard, Command, Container, Element, HorizontalAlignment,
-    Length, Row, Scrollable, Settings, Text, TextInput, VerticalAlignment, Space
-};
+use iced::{executor, Application, Button, Clipboard, Command, Container, Element, HorizontalAlignment, Length, Row, Scrollable, Settings, Text, TextInput, VerticalAlignment, Space, PickList};
 use iced_futures::{futures, BoxStream};
 use iced_native::subscription::Subscription;
 
@@ -40,6 +38,12 @@ use audio::AudioMessage;
 use crate::audio::AudioHandle;
 use crate::song_listing::FileSongListing;
 
+use lazy_static::lazy_static;
+
+lazy_static! {
+    static ref SUPPORTED_HOSTS: Vec<audio::HostSelector> = audio::HostSelector::supported();
+}
+
 #[derive(Debug)]
 struct Example {
     kb_worker: KbWorker,
@@ -51,6 +55,12 @@ struct Example {
     current: usize,
     play_button: iced::button::State,
     pause_button: iced::button::State,
+    host_picklist: iced::pick_list::State<audio::HostSelector>,
+    selected_host: audio::HostSelector,
+    device_picklist: iced::pick_list::State<String>,
+    selected_device: Option<String>,
+    supported_devices: Vec<String>,
+    settings_apply_button: iced::button::State,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +69,9 @@ pub enum Message {
     KeyEvent(input::keycode::KeyCode),
     VolumeChanged(f32),
     AudioMessage(audio::AudioMessage),
+    HostSelection(audio::HostSelector),
+    DeviceSelection(String),
+    ApplySettings,
     None
 }
 
@@ -89,7 +102,13 @@ impl Application for Example {
                 songs,
                 current: 0,
                 play_button: iced::button::State::new(),
-                pause_button: iced::button::State::new()
+                pause_button: iced::button::State::new(),
+                host_picklist: iced::pick_list::State::<audio::HostSelector>::default(),
+                selected_host: *SUPPORTED_HOSTS.first().unwrap(),
+                device_picklist: iced::pick_list::State::<String>::default(),
+                supported_devices: SUPPORTED_HOSTS.first().unwrap().supported_output_devices(),
+                selected_device: None,
+                settings_apply_button: iced::button::State::new(),
             },
             Command::none(),
         )
@@ -113,6 +132,21 @@ impl Application for Example {
             }
             Message::AudioMessage(msg) => {
                 self.audio_handle.send(msg)
+            }
+            Message::HostSelection(host) => {
+                self.selected_host = host;
+                self.supported_devices = self.selected_host.supported_output_devices();
+                self.selected_device = None;
+                debug!("Selected host {}", host);
+            }
+            Message::DeviceSelection(device) => {
+                debug!("Selected device {}", device);
+                self.selected_device = Some(device);
+            }
+            Message::ApplySettings => {
+                if self.selected_device.is_some() {
+                    debug!("Applying settings... Host: {} Device: {}", self.selected_host, self.selected_device.as_ref().unwrap())
+                }
             }
             Message::None => {}
         }
@@ -223,7 +257,25 @@ impl Application for Example {
             .height(Length::FillPortion(10))
             .into();
 
-        let combined: Element<_> = Column::new().push(tempo).push(grid).push(volume).into();
+        let settings: Element<_> = Row::new()
+            .padding(10)
+            .push(PickList::new(&mut self.host_picklist, SUPPORTED_HOSTS.deref(), Some(self.selected_host), Message::HostSelection).width(Length::FillPortion(40)))
+            .push(PickList::new(&mut self.device_picklist, &self.supported_devices, self.selected_device.clone(), Message::DeviceSelection).width(Length::FillPortion(50)))
+            .push(Button::new(&mut self.settings_apply_button, Text::new("Apply"))
+                .on_press(Message::ApplySettings)
+                .width(Length::FillPortion(10))
+            )
+            .spacing(10)
+            .height(Length::FillPortion(10))
+            .into();
+
+
+        let combined: Element<_> = Column::new()
+            .push(tempo)
+            .push(grid)
+            .push(volume)
+            .push(settings)
+            .into();
 
         Container::new(combined)
             .width(Length::Fill)
@@ -275,7 +327,7 @@ fn main() {
         })
         .format(|out, message, record| {
             out.finish(format_args!(
-                "[{}] [{} -> {}:{}] [{}]\n-> {}",
+                "[{}] [{} -> {}:{}] [{}] -> {}",
                 chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
                 record.module_path().or_else(|| { Some("unknown") }).unwrap(),
                 record.file().or_else(|| { Some("unknown") }).unwrap(),
@@ -293,12 +345,12 @@ fn main() {
         songs.push(song_listing::FileSongListing::random());
     }
     let yaml = serde_yaml::to_string(&songs).unwrap();
-    println!("{}", yaml);
+    debug!("{}", yaml);
     let songs2: Vec<song_listing::FileSongListing> = serde_yaml::from_str(&yaml).unwrap();
     for song in songs2 {
-        println!("{}", song.title());
+        debug!("{}", song.title());
     }
-    return;
+    // return;
 
     let input_handler = input::init();
 
